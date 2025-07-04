@@ -9,6 +9,10 @@
 (define-constant ERR_INSUFFICIENT_PAYMENT (err u107))
 (define-constant ERR_TRANSFER_FAILED (err u108))
 
+(define-constant ERR_LISTING_NOT_FOUND (err u109))
+(define-constant ERR_INSUFFICIENT_LISTING (err u110))
+(define-constant ERR_INVALID_PRICE (err u111))
+
 (define-fungible-token bond-token)
 
 (define-map bonds
@@ -272,5 +276,89 @@
     )
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
     (stx-transfer? amount tx-sender (as-contract tx-sender))
+  )
+)
+
+
+
+(define-map marketplace-listings
+  { bond-id: uint, seller: principal }
+  { amount: uint, price-per-unit: uint }
+)
+
+(define-data-var marketplace-fee uint u250)
+
+(define-read-only (get-marketplace-listing (bond-id uint) (seller principal))
+  (map-get? marketplace-listings { bond-id: bond-id, seller: seller })
+)
+
+(define-read-only (get-marketplace-fee)
+  (var-get marketplace-fee)
+)
+
+(define-public (list-bonds-for-sale (bond-id uint) (amount uint) (price-per-unit uint))
+  (let
+    (
+      (seller-balance (get-bond-balance bond-id tx-sender))
+    )
+    (asserts! (is-some (get-bond-info bond-id)) ERR_BOND_NOT_FOUND)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (> price-per-unit u0) ERR_INVALID_PRICE)
+    (asserts! (>= seller-balance amount) ERR_INSUFFICIENT_BALANCE)
+    
+    (map-set marketplace-listings
+      { bond-id: bond-id, seller: tx-sender }
+      { amount: amount, price-per-unit: price-per-unit }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (buy-bonds-from-market (bond-id uint) (seller principal) (amount uint))
+  (let
+    (
+      (listing (unwrap! (get-marketplace-listing bond-id seller) ERR_LISTING_NOT_FOUND))
+      (available-amount (get amount listing))
+      (price-per-unit (get price-per-unit listing))
+      (total-cost (* amount price-per-unit))
+      (marketplace-fee-amount (/ (* total-cost (var-get marketplace-fee)) u10000))
+      (seller-payment (- total-cost marketplace-fee-amount))
+    )
+    (asserts! (is-some (get-bond-info bond-id)) ERR_BOND_NOT_FOUND)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (>= available-amount amount) ERR_INSUFFICIENT_LISTING)
+    (asserts! (>= (get-bond-balance bond-id seller) amount) ERR_INSUFFICIENT_BALANCE)
+    
+    (try! (stx-transfer? seller-payment tx-sender seller))
+    (try! (stx-transfer? marketplace-fee-amount tx-sender (as-contract tx-sender)))
+    
+    (map-set bond-balances
+      { bond-id: bond-id, holder: seller }
+      { balance: (- (get-bond-balance bond-id seller) amount) }
+    )
+    
+    (map-set bond-balances
+      { bond-id: bond-id, holder: tx-sender }
+      { balance: (+ (get-bond-balance bond-id tx-sender) amount) }
+    )
+    
+    (if (> available-amount amount)
+      (map-set marketplace-listings
+        { bond-id: bond-id, seller: seller }
+        { amount: (- available-amount amount), price-per-unit: price-per-unit }
+      )
+      (map-delete marketplace-listings { bond-id: bond-id, seller: seller })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (cancel-listing (bond-id uint))
+  (begin
+    (asserts! (is-some (get-marketplace-listing bond-id tx-sender)) ERR_LISTING_NOT_FOUND)
+    (map-delete marketplace-listings { bond-id: bond-id, seller: tx-sender })
+    (ok true)
   )
 )
