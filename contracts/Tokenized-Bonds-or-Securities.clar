@@ -9,6 +9,13 @@
 (define-constant ERR_INSUFFICIENT_PAYMENT (err u107))
 (define-constant ERR_TRANSFER_FAILED (err u108))
 
+(define-constant MIN_RATING u1)
+(define-constant MAX_RATING u10)
+(define-constant ERR_INVALID_RATING (err u112))
+(define-constant ERR_ALREADY_RATED (err u113))
+(define-constant ERR_INSUFFICIENT_HOLDING_PERIOD (err u114))
+(define-constant MIN_HOLDING_BLOCKS u144)
+
 (define-constant ERR_LISTING_NOT_FOUND (err u109))
 (define-constant ERR_INSUFFICIENT_LISTING (err u110))
 (define-constant ERR_INVALID_PRICE (err u111))
@@ -359,6 +366,106 @@
   (begin
     (asserts! (is-some (get-marketplace-listing bond-id tx-sender)) ERR_LISTING_NOT_FOUND)
     (map-delete marketplace-listings { bond-id: bond-id, seller: tx-sender })
+    (ok true)
+  )
+)
+
+(define-map bond-ratings
+  { bond-id: uint }
+  { 
+    issuer-rating: uint,
+    community-rating: uint,
+    total-community-votes: uint,
+    community-rating-sum: uint
+  }
+)
+
+(define-map user-bond-ratings
+  { bond-id: uint, rater: principal }
+  { rating: uint, voted-at-block: uint }
+)
+
+(define-read-only (get-bond-rating (bond-id uint))
+  (map-get? bond-ratings { bond-id: bond-id })
+)
+
+(define-read-only (get-user-rating (bond-id uint) (rater principal))
+  (map-get? user-bond-ratings { bond-id: bond-id, rater: rater })
+)
+
+(define-read-only (calculate-composite-rating (bond-id uint))
+  (match (get-bond-rating bond-id)
+    rating-data
+    (let
+      (
+        (issuer-rating (get issuer-rating rating-data))
+        (community-votes (get total-community-votes rating-data))
+        (community-sum (get community-rating-sum rating-data))
+      )
+      (if (> community-votes u0)
+        (/ (+ (* issuer-rating u3) (/ community-sum community-votes)) u4)
+        issuer-rating
+      )
+    )
+    u0
+  )
+)
+
+(define-public (set-issuer-rating (bond-id uint) (rating uint))
+  (let
+    (
+      (bond-info (unwrap! (get-bond-info bond-id) ERR_BOND_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender (get issuer bond-info)) ERR_UNAUTHORIZED)
+    (asserts! (and (>= rating MIN_RATING) (<= rating MAX_RATING)) ERR_INVALID_RATING)
+    
+    (map-set bond-ratings
+      { bond-id: bond-id }
+      (merge 
+        (default-to 
+          { issuer-rating: u0, community-rating: u0, total-community-votes: u0, community-rating-sum: u0 }
+          (get-bond-rating bond-id)
+        )
+        { issuer-rating: rating }
+      )
+    )
+    (ok true)
+  )
+)
+
+(define-public (submit-community-rating (bond-id uint) (rating uint))
+  (let
+    (
+      (bond-info (unwrap! (get-bond-info bond-id) ERR_BOND_NOT_FOUND))
+      (user-balance (get-bond-balance bond-id tx-sender))
+      (existing-rating (get-user-rating bond-id tx-sender))
+      (current-ratings (default-to 
+        { issuer-rating: u0, community-rating: u0, total-community-votes: u0, community-rating-sum: u0 }
+        (get-bond-rating bond-id)
+      ))
+    )
+    (asserts! (> user-balance u0) ERR_INSUFFICIENT_BALANCE)
+    (asserts! (and (>= rating MIN_RATING) (<= rating MAX_RATING)) ERR_INVALID_RATING)
+    (asserts! (is-none existing-rating) ERR_ALREADY_RATED)
+    (asserts! (>= (- stacks-block-height (get issue-block bond-info)) MIN_HOLDING_BLOCKS) ERR_INSUFFICIENT_HOLDING_PERIOD)
+    
+    (map-set user-bond-ratings
+      { bond-id: bond-id, rater: tx-sender }
+      { rating: rating, voted-at-block: stacks-block-height }
+    )
+    
+    (map-set bond-ratings
+      { bond-id: bond-id }
+      {
+        issuer-rating: (get issuer-rating current-ratings),
+        community-rating: (if (> (+ (get total-community-votes current-ratings) u1) u0)
+          (/ (+ (get community-rating-sum current-ratings) rating) (+ (get total-community-votes current-ratings) u1))
+          rating
+        ),
+        total-community-votes: (+ (get total-community-votes current-ratings) u1),
+        community-rating-sum: (+ (get community-rating-sum current-ratings) rating)
+      }
+    )
     (ok true)
   )
 )
