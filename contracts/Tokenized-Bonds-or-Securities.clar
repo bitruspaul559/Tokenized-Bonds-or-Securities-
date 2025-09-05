@@ -469,3 +469,110 @@
     (ok true)
   )
 )
+
+(define-constant ERR_ORACLE_NOT_INITIALIZED (err u115))
+(define-constant ERR_INSUFFICIENT_TRADE_DATA (err u116))
+
+(define-map bond-price-oracle
+  { bond-id: uint }
+  { 
+    last-trade-price: uint,
+    last-trade-block: uint,
+    trade-count: uint,
+    cumulative-volume: uint,
+    theoretical-price: uint
+  }
+)
+
+(define-map recent-trades
+  { bond-id: uint, trade-index: uint }
+  { price: uint, volume: uint, block-height: uint }
+)
+
+(define-data-var max-trade-history uint u10)
+
+(define-read-only (get-oracle-data (bond-id uint))
+  (map-get? bond-price-oracle { bond-id: bond-id })
+)
+
+(define-read-only (calculate-yield-to-maturity (bond-id uint) (market-price uint))
+  (match (get-bond-info bond-id)
+    bond-data
+    (let
+      (
+        (face-value (get face-value bond-data))
+        (coupon-rate (get coupon-rate bond-data))
+        (blocks-to-maturity (- (get maturity-block bond-data) stacks-block-height))
+        (annual-coupon (* face-value (/ coupon-rate u10000)))
+      )
+      (if (> blocks-to-maturity u0)
+        (/ (* (+ annual-coupon (/ (* (- face-value market-price) u10000) blocks-to-maturity)) u10000) market-price)
+        u0
+      )
+    )
+    u0
+  )
+)
+
+(define-read-only (get-theoretical-price (bond-id uint))
+  (match (get-bond-info bond-id)
+    bond-data
+    (let
+      (
+        (face-value (get face-value bond-data))
+        (coupon-rate (get coupon-rate bond-data))
+        (blocks-to-maturity (- (get maturity-block bond-data) stacks-block-height))
+        (market-rate u500)
+      )
+      (if (> blocks-to-maturity u0)
+        (+ 
+          (/ (* face-value u10000) (+ u10000 (* market-rate (/ blocks-to-maturity u52560))))
+          (/ (* (* face-value coupon-rate) blocks-to-maturity) (* u10000 (+ u10000 (* market-rate (/ blocks-to-maturity u52560)))))
+        )
+        face-value
+      )
+    )
+    u0
+  )
+)
+
+(define-public (update-oracle (bond-id uint) (trade-price uint) (trade-volume uint))
+  (let
+    (
+      (current-oracle (default-to 
+        { last-trade-price: u0, last-trade-block: u0, trade-count: u0, cumulative-volume: u0, theoretical-price: u0 }
+        (get-oracle-data bond-id)
+      ))
+      (theoretical-price (get-theoretical-price bond-id))
+      (new-trade-count (+ (get trade-count current-oracle) u1))
+    )
+    (asserts! (is-some (get-bond-info bond-id)) ERR_BOND_NOT_FOUND)
+    (asserts! (> trade-price u0) ERR_INVALID_PRICE)
+    (asserts! (> trade-volume u0) ERR_INVALID_AMOUNT)
+    
+    (map-set recent-trades
+      { bond-id: bond-id, trade-index: (mod new-trade-count (var-get max-trade-history)) }
+      { price: trade-price, volume: trade-volume, block-height: stacks-block-height }
+    )
+    
+    (map-set bond-price-oracle
+      { bond-id: bond-id }
+      {
+        last-trade-price: trade-price,
+        last-trade-block: stacks-block-height,
+        trade-count: new-trade-count,
+        cumulative-volume: (+ (get cumulative-volume current-oracle) trade-volume),
+        theoretical-price: theoretical-price
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-simple-average-price (bond-id uint))
+  (match (get-oracle-data bond-id)
+    oracle-data
+    (get last-trade-price oracle-data)
+    u0
+  )
+)
