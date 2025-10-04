@@ -576,3 +576,96 @@
     u0
   )
 )
+
+(define-constant ERR_ESCROW_NOT_FOUND (err u117))
+(define-constant ERR_ESCROW_ALREADY_SETTLED (err u118))
+(define-constant ERR_ESCROW_NOT_SELLER (err u119))
+(define-constant ERR_ESCROW_NOT_BUYER (err u120))
+
+(define-map bond-escrows
+  { escrow-id: uint }
+  {
+    bond-id: uint,
+    seller: principal,
+    buyer: (optional principal),
+    bond-amount: uint,
+    stx-amount: uint,
+    is-settled: bool,
+    created-at-block: uint
+  }
+)
+
+(define-data-var next-escrow-id uint u1)
+
+(define-read-only (get-escrow-info (escrow-id uint))
+  (map-get? bond-escrows { escrow-id: escrow-id })
+)
+
+(define-read-only (get-next-escrow-id)
+  (var-get next-escrow-id)
+)
+
+(define-public (create-escrow (bond-id uint) (bond-amount uint) (stx-amount uint) (buyer (optional principal)))
+  (let
+    (
+      (escrow-id (var-get next-escrow-id))
+      (seller-balance (get-bond-balance bond-id tx-sender))
+    )
+    (asserts! (is-some (get-bond-info bond-id)) ERR_BOND_NOT_FOUND)
+    (asserts! (> bond-amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (> stx-amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (>= seller-balance bond-amount) ERR_INSUFFICIENT_BALANCE)
+    
+    (map-set bond-escrows
+      { escrow-id: escrow-id }
+      {
+        bond-id: bond-id,
+        seller: tx-sender,
+        buyer: buyer,
+        bond-amount: bond-amount,
+        stx-amount: stx-amount,
+        is-settled: false,
+        created-at-block: stacks-block-height
+      }
+    )
+    
+    (var-set next-escrow-id (+ escrow-id u1))
+    (ok escrow-id)
+  )
+)
+
+(define-public (settle-escrow (escrow-id uint))
+  (let
+    (
+      (escrow (unwrap! (get-escrow-info escrow-id) ERR_ESCROW_NOT_FOUND))
+      (bond-id (get bond-id escrow))
+      (seller (get seller escrow))
+      (specified-buyer (get buyer escrow))
+      (bond-amount (get bond-amount escrow))
+      (stx-amount (get stx-amount escrow))
+    )
+    (asserts! (not (get is-settled escrow)) ERR_ESCROW_ALREADY_SETTLED)
+    (asserts! (or (is-none specified-buyer) (is-eq (some tx-sender) specified-buyer)) ERR_ESCROW_NOT_BUYER)
+    (asserts! (>= (get-bond-balance bond-id seller) bond-amount) ERR_INSUFFICIENT_BALANCE)
+    
+    (try! (stx-transfer? stx-amount tx-sender seller))
+    (unwrap! (transfer-bond-internal bond-id bond-amount seller tx-sender) ERR_TRANSFER_FAILED)
+    
+    (map-set bond-escrows
+      { escrow-id: escrow-id }
+      (merge escrow { is-settled: true })
+    )
+    (ok true)
+  )
+)
+
+(define-private (transfer-bond-internal (bond-id uint) (amount uint) (from principal) (to principal))
+  (let
+    (
+      (from-balance (get-bond-balance bond-id from))
+    )
+    (map-set bond-balances { bond-id: bond-id, holder: from } { balance: (- from-balance amount) })
+    (map-set bond-balances { bond-id: bond-id, holder: to } { balance: (+ (get-bond-balance bond-id to) amount) })
+    (ok true)
+  )
+)
