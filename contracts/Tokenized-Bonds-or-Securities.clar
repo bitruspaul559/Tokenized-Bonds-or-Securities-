@@ -20,6 +20,10 @@
 (define-constant ERR_INSUFFICIENT_LISTING (err u110))
 (define-constant ERR_INVALID_PRICE (err u111))
 
+(define-constant ERR_STREAM_NOT_FOUND (err u121))
+(define-constant ERR_NO_CLAIMABLE_DIVIDENDS (err u122))
+(define-constant ERR_STREAM_DEPOSIT_FAILED (err u123))
+
 (define-fungible-token bond-token)
 
 (define-map bonds
@@ -667,5 +671,105 @@
     (map-set bond-balances { bond-id: bond-id, holder: from } { balance: (- from-balance amount) })
     (map-set bond-balances { bond-id: bond-id, holder: to } { balance: (+ (get-bond-balance bond-id to) amount) })
     (ok true)
+  )
+)
+
+(define-map dividend-streams
+  { bond-id: uint }
+  {
+    total-deposited: uint,
+    total-claimed: uint,
+    last-deposit-block: uint,
+    rewards-per-unit: uint,
+    blocks-per-period: uint
+  }
+)
+
+(define-map holder-stream-state
+  { bond-id: uint, holder: principal }
+  {
+    last-claimed-block: uint,
+    accumulated-rewards: uint,
+    debt: uint
+  }
+)
+
+(define-read-only (get-stream-info (bond-id uint))
+  (map-get? dividend-streams { bond-id: bond-id })
+)
+
+(define-read-only (get-holder-stream-state (bond-id uint) (holder principal))
+  (map-get? holder-stream-state { bond-id: bond-id, holder: holder })
+)
+
+(define-read-only (calculate-pending-dividends (bond-id uint) (holder principal))
+  (let
+    (
+      (stream (default-to { total-deposited: u0, total-claimed: u0, last-deposit-block: u0, rewards-per-unit: u0, blocks-per-period: u1 }
+        (get-stream-info bond-id)))
+      (holder-state (default-to { last-claimed-block: u0, accumulated-rewards: u0, debt: u0 }
+        (get-holder-stream-state bond-id holder)))
+      (holder-balance (get-bond-balance bond-id holder))
+      (rewards-per-unit (get rewards-per-unit stream))
+      (pending-from-balance (* holder-balance rewards-per-unit))
+      (debt (get debt holder-state))
+    )
+    (if (>= pending-from-balance debt)
+      (+ (get accumulated-rewards holder-state) (- pending-from-balance debt))
+      (get accumulated-rewards holder-state)
+    )
+  )
+)
+
+(define-public (deposit-stream-dividends (bond-id uint) (amount uint))
+  (let
+    (
+      (bond-info (unwrap! (get-bond-info bond-id) ERR_BOND_NOT_FOUND))
+      (total-supply (get total-supply bond-info))
+      (current-stream (default-to { total-deposited: u0, total-claimed: u0, last-deposit-block: u0, rewards-per-unit: u0, blocks-per-period: u144 }
+        (get-stream-info bond-id)))
+      (new-rewards-per-unit (if (> total-supply u0) (/ amount total-supply) u0))
+    )
+    (asserts! (is-eq tx-sender (get issuer bond-info)) ERR_UNAUTHORIZED)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (map-set dividend-streams
+      { bond-id: bond-id }
+      {
+        total-deposited: (+ (get total-deposited current-stream) amount),
+        total-claimed: (get total-claimed current-stream),
+        last-deposit-block: stacks-block-height,
+        rewards-per-unit: (+ (get rewards-per-unit current-stream) new-rewards-per-unit),
+        blocks-per-period: (get blocks-per-period current-stream)
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (claim-stream-dividends (bond-id uint))
+  (let
+    (
+      (pending (calculate-pending-dividends bond-id tx-sender))
+      (stream (unwrap! (get-stream-info bond-id) ERR_STREAM_NOT_FOUND))
+      (holder-balance (get-bond-balance bond-id tx-sender))
+      (current-state (default-to { last-claimed-block: u0, accumulated-rewards: u0, debt: u0 }
+        (get-holder-stream-state bond-id tx-sender)))
+    )
+    (asserts! (> pending u0) ERR_NO_CLAIMABLE_DIVIDENDS)
+    (try! (as-contract (stx-transfer? pending (as-contract tx-sender) tx-sender)))
+    (map-set dividend-streams
+      { bond-id: bond-id }
+      (merge stream { total-claimed: (+ (get total-claimed stream) pending) })
+    )
+    (map-set holder-stream-state
+      { bond-id: bond-id, holder: tx-sender }
+      {
+        last-claimed-block: stacks-block-height,
+        accumulated-rewards: u0,
+        debt: (* holder-balance (get rewards-per-unit stream))
+      }
+    )
+    (ok pending)
   )
 )
